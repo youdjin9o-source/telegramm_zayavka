@@ -1,42 +1,64 @@
 import os
-import requests
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 
 load_dotenv()
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-SITE_LOGIN = os.getenv("SITE_LOGIN")
-SITE_PASSWORD = os.getenv("SITE_PASSWORD")
+# СТАНИ
+CHOOSING_PERSON, ENTER_DATETIME, ENTER_TEXT = range(3)
+
+# Кнопки
+main_menu = ReplyKeyboardMarkup(
+    [["Нагадати"], ["Список нагадувань"], ["Скасувати"]],
+    resize_keyboard=True
+)
+people_menu = ReplyKeyboardMarkup(
+    [["Ярослав", "Анна", "Єгор"]],
+    resize_keyboard=True
+)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Кидай номер машини, і я попробую щось знайти.")
+    await update.message.reply_text("Гаразд, поїхали. Обери дію:", reply_markup=main_menu)
+    return CHOOSING_PERSON
 
-async def handle_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    car_number = update.message.text.strip()
+async def choose_person(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "Нагадати":
+        await update.message.reply_text("Кому нагадати?", reply_markup=people_menu)
+        return ENTER_DATETIME
+    await update.message.reply_text("Вибери нормально.", reply_markup=main_menu)
+    return CHOOSING_PERSON
 
-    # Тут НЕ хакерство, а авторизований запит, бо логін у тебе.
-    response = requests.post(
-        "https://твій-сайт.домен/login",
-        data={"login": SITE_LOGIN, "password": SITE_PASSWORD}
+async def get_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["person"] = update.message.text
+    await update.message.reply_text("Введи дату і час у форматі ДД.ММ ГГ:ХХ")
+    return ENTER_TEXT
+
+async def get_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["datetime"] = update.message.text
+    await update.message.reply_text("Окей, а тепер текст нагадування:")
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Скасовано. Як твої плани на завтра? Та неважливо.", reply_markup=main_menu)
+    return ConversationHandler.END
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            CHOOSING_PERSON: [MessageHandler(filters.TEXT, choose_person)],
+            ENTER_DATETIME: [MessageHandler(filters.TEXT, get_datetime)],
+            ENTER_TEXT: [MessageHandler(filters.TEXT, get_text)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
     )
 
-    # Потім робиш запит до сторінки з пошуком
-    search = requests.get(
-        f"https://твій-сайт.домен/search?number={car_number}",
-        cookies=response.cookies
-    )
+    app.add_handler(conv)
+    app.run_polling()
 
-    # Парсиш результат (по-хорошому через BeautifulSoup)
-    # а тут просто як приклад
-    if "заявка" in search.text:
-        await update.message.reply_text("Ось твоя заявка: №12345")
-    else:
-        await update.message.reply_text("Нічого не знайшов, йой...")
-
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_number))
-
-app.run_polling()
+if __name__ == "__main__":
+    main()
