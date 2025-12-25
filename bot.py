@@ -1,21 +1,28 @@
 import os
+import asyncio
+from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters, ConversationHandler,
+    ContextTypes, CallbackQueryHandler
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Словник користувачів
+# Ролі
+PARENTS = ["Ярослав", "Анна"]
+CHILD = "Єгор"
+
 USERS = {
     "Єгор": 6673177017,
     "Ярослав": 7754277795,
     "Анна": 1223902928
 }
 
-# Список нагадувань у пам'яті
+# Пам'ять нагадувань
 reminders = []
 
 # Стан конверсії
@@ -25,8 +32,12 @@ scheduler = AsyncIOScheduler()
 scheduler.start()
 
 # Кнопки
-main_menu = ReplyKeyboardMarkup(
+main_menu_parent = ReplyKeyboardMarkup(
     [["Нагадати"], ["Список нагадувань"], ["Скасувати"]],
+    resize_keyboard=True
+)
+main_menu_child = ReplyKeyboardMarkup(
+    [["Список нагадувань"]],
     resize_keyboard=True
 )
 people_menu = ReplyKeyboardMarkup(
@@ -35,26 +46,31 @@ people_menu = ReplyKeyboardMarkup(
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привіт! Обери дію:", reply_markup=main_menu)
+    user_id = update.message.from_user.id
+    role_menu = main_menu_parent if user_id in [USERS[p] for p in PARENTS] else main_menu_child
+    await update.message.reply_text("Привіт! Обери дію:", reply_markup=role_menu)
     return CHOOSING_ACTION
 
 async def choosing_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    if text == "Нагадати":
+    user_id = update.message.from_user.id
+
+    if text == "Нагадати" and user_id in [USERS[p] for p in PARENTS]:
         await update.message.reply_text("Кому нагадати?", reply_markup=people_menu)
         return CHOOSING_PERSON
     elif text == "Список нагадувань":
-        if not reminders:
-            await update.message.reply_text("Поки немає нагадувань.")
+        user_reminders = [r for r in reminders if r["person_id"] == user_id]
+        if not user_reminders:
+            await update.message.reply_text("Нагадувань немає.")
         else:
-            msg = "\n".join([f"{r['person']} | {r['datetime']} | {r['text']}" for r in reminders])
-            await update.message.reply_text("Нагадування:\n" + msg)
+            msg = "\n".join([f"{r['datetime'].strftime('%d.%m %H:%M')} — {r['text']}" for r in user_reminders])
+            await update.message.reply_text(msg)
         return CHOOSING_ACTION
     elif text == "Скасувати":
-        await update.message.reply_text("Скасовано.", reply_markup=main_menu)
+        await update.message.reply_text("Скасовано.", reply_markup=main_menu_parent)
         return CHOOSING_ACTION
     else:
-        await update.message.reply_text("Оберіть кнопку.", reply_markup=main_menu)
+        await update.message.reply_text("Оберіть кнопку правильно.")
         return CHOOSING_ACTION
 
 async def choosing_person(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -62,8 +78,9 @@ async def choosing_person(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if person not in USERS:
         await update.message.reply_text("Оберіть одного з користувачів.", reply_markup=people_menu)
         return CHOOSING_PERSON
-    context.user_data["person"] = person
-    await update.message.reply_text("Введи дату та час у форматі ДД.MM ЧЧ:ММ (наприклад 27.01 16:00)")
+    context.user_data["person_name"] = person
+    context.user_data["person_id"] = USERS[person]
+    await update.message.reply_text("Введи дату і час у форматі ДД.MM ЧЧ:ММ")
     return ENTER_DATETIME
 
 async def enter_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -74,30 +91,30 @@ async def enter_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введи текст нагадування:")
         return ENTER_TEXT
     except:
-        await update.message.reply_text("Неправильний формат. Спробуй ще раз: ДД.MM ЧЧ:ММ")
+        await update.message.reply_text("Неправильний формат. Спробуй: ДД.MM ЧЧ:ММ")
         return ENTER_DATETIME
 
 async def enter_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    person = context.user_data["person"]
-    dt = context.user_data["datetime"]
-
-    # зберігаємо нагадування
-    reminder = {"person": person, "datetime": dt, "text": text}
+    reminder = {
+        "person_name": context.user_data["person_name"],
+        "person_id": context.user_data["person_id"],
+        "datetime": context.user_data["datetime"],
+        "text": text
+    }
     reminders.append(reminder)
 
-    # створюємо кнопку ✔️
+    # Кнопка ✔️
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✔️ Зробив", callback_data=f"done_{len(reminders)-1}")]])
 
-    # плануємо відправку
+    # Плануємо нагадування
     scheduler.add_job(
-        send_reminder,
+        lambda: asyncio.create_task(send_reminder(reminder["person_id"], reminder["text"], keyboard)),
         'date',
-        run_date=dt,
-        args=[USERS[person], text, keyboard]
+        run_date=reminder["datetime"]
     )
 
-    await update.message.reply_text(f"Нагадування для {person} збережено.", reply_markup=main_menu)
+    await update.message.reply_text(f"Нагадування для {reminder['person_name']} збережено.", reply_markup=main_menu_parent)
     return CHOOSING_ACTION
 
 async def send_reminder(chat_id, text, keyboard):
@@ -106,20 +123,19 @@ async def send_reminder(chat_id, text, keyboard):
 async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # done_0, done_1...
-    index = int(data.split("_")[1])
+    index = int(query.data.split("_")[1])
     reminder = reminders[index]
-    # повідомляємо батьків (Ярослав та Анна)
-    for parent in ["Ярослав", "Анна"]:
-        if parent != reminder["person"]:  # щоб не надсилати тому, хто виконав
-            await context.bot.send_message(USERS[parent], f"{reminder['person']} виконав: {reminder['text']}")
+
+    # Повідомляємо батьків
+    for parent in PARENTS:
+        if USERS[parent] != reminder["person_id"]:
+            await context.bot.send_message(USERS[parent], f"{reminder['person_name']} виконав: {reminder['text']}")
     await query.edit_message_text(f"✅ Виконано: {reminder['text']}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Скасовано.", reply_markup=main_menu)
+    await update.message.reply_text("Скасовано.", reply_markup=main_menu_parent)
     return CHOOSING_ACTION
 
-# Створюємо Application
 app = Application.builder().token(TOKEN).build()
 
 conv_handler = ConversationHandler(
@@ -128,7 +144,7 @@ conv_handler = ConversationHandler(
         CHOOSING_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, choosing_action)],
         CHOOSING_PERSON: [MessageHandler(filters.TEXT & ~filters.COMMAND, choosing_person)],
         ENTER_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_datetime)],
-        ENTER_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_text)]
+        ENTER_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_text)],
     },
     fallbacks=[CommandHandler("cancel", cancel)]
 )
